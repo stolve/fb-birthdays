@@ -1,0 +1,12 @@
+{
+  "name": "fb-birthdays-scraper",
+  "version": "1.0.0",
+  "description": "Scrape friends' birthdays from Facebook and export to CSV",
+  "main": "scrape.js",
+  "scripts": {
+    "start": "node scrape.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  }
+}
