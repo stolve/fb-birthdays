@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * Facebook Birthdays Scraper v2
+ * Facebook Birthdays Scraper v3
  * 
- * Launches a browser, you log into Facebook manually,
- * then it scrapes all your friends' birthdays and saves to CSV.
+ * Birthdays on Facebook's birthdays page show up as tooltips on user avatars/images.
+ * This script hovers over each image to trigger the tooltip, reads the name + birthday,
+ * and exports to CSV.
  * 
  * Usage:
  *   npm install playwright
@@ -16,8 +17,8 @@ const path = require('path');
 
 const BIRTHDAYS_URL = 'https://www.facebook.com/events/birthdays';
 const OUTPUT_FILE = path.join(__dirname, 'birthdays.csv');
-const DEBUG_HTML = path.join(__dirname, 'birthdays-debug.html');
 const DEBUG_TXT = path.join(__dirname, 'birthdays-debug.txt');
+const DEBUG_HTML = path.join(__dirname, 'birthdays-debug.html');
 
 (async () => {
   const browser = await chromium.launch({ headless: false });
@@ -26,7 +27,7 @@ const DEBUG_TXT = path.join(__dirname, 'birthdays-debug.txt');
   });
   const page = await context.newPage();
 
-  console.log('\n📅 Facebook Birthdays Scraper v2\n');
+  console.log('\n📅 Facebook Birthdays Scraper v3\n');
   console.log('1. A browser window has opened.');
   console.log('2. Log into your Facebook account.');
   console.log('3. Once you\'re logged in and see your feed, come back here and press Enter.\n');
@@ -42,181 +43,210 @@ const DEBUG_TXT = path.join(__dirname, 'birthdays-debug.txt');
   await page.goto(BIRTHDAYS_URL, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(5000);
 
-  // Save debug screenshots and HTML at the start
-  await page.screenshot({ path: path.join(__dirname, 'birthdays-start.png'), fullPage: false });
-  console.log('📸 Saved screenshot to birthdays-start.png');
+  // Save debug info
+  await page.screenshot({ path: path.join(__dirname, 'birthdays-start.png') });
+  const html = await page.content();
+  fs.writeFileSync(DEBUG_HTML, html);
+  const pageText = await page.evaluate(() => document.body.innerText);
+  fs.writeFileSync(DEBUG_TXT, pageText);
 
-  // Collect all birthdays by scrolling and parsing
   const allBirthdays = new Map();
-  let noNewCount = 0;
-  let maxIterations = 100;
-  let iteration = 0;
+  const monthNames = 'January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
+  const dateRegex = new RegExp(`(${monthNames})\\s+(\\d{1,2})(?:,?\\s*(\\d{4}))?`, 'i');
 
-  console.log('🔄 Scrolling and collecting birthdays...');
+  console.log('🔄 Scrolling to load all birthday entries...');
 
-  while (iteration < maxIterations) {
-    // Parse current viewport
-    const entries = await page.evaluate(() => {
-      const results = [];
-      const seen = new Set();
-
-      // Strategy 1: Find all anchor tags that link to user profiles
-      // Facebook profile links look like: /user/NAME, /profile.php?id=NUMBER, or /NAME
-      const profileLinks = document.querySelectorAll('a[href*="/user/"], a[href*="profile.php?id="]');
-      
-      for (const link of profileLinks) {
-        const name = link.textContent?.trim();
-        const href = link.getAttribute('href') || '';
-        if (!name || name.length < 2 || name.length > 80) continue;
-        if (seen.has(name)) continue;
-        
-        // Look for a date near this link — check parent and siblings
-        let parent = link.parentElement;
-        let dateText = '';
-        
-        // Walk up a few levels looking for date text
-        for (let depth = 0; depth < 5 && parent && !dateText; depth++) {
-          const text = parent.textContent || '';
-          
-          // Match "March 15", "March 15, 1990", "Mar 15", etc.
-          const monthNames = 'January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
-          const dateRegex = new RegExp(`(${monthNames})\\s+(\\d{1,2})(?:,?\\s*(\\d{4}))?`, 'i');
-          const match = text.match(dateRegex);
-          if (match) {
-            dateText = match[0];
-          }
-          parent = parent.parentElement;
-        }
-        
-        if (dateText) {
-          seen.add(name);
-          results.push({ name, date: dateText, href });
-        }
-      }
-
-      // Strategy 2: Find elements with birthday-related aria labels or data attributes
-      const birthdayElements = document.querySelectorAll('[aria-label*="birthday" i], [data-testid*="birthday" i], [role="article"]');
-      for (const el of birthdayElements) {
-        const text = el.textContent || '';
-        const monthNames = 'January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
-        const dateRegex = new RegExp(`(${monthNames})\\s+(\\d{1,2})(?:,?\\s*(\\d{4}))?`, 'i');
-        const dateMatch = text.match(dateRegex);
-        if (dateMatch) {
-          // Find the first link in this element for the name
-          const nameLink = el.querySelector('a[href*="/user/"], a[href*="profile.php?id="]');
-          if (nameLink) {
-            const name = nameLink.textContent?.trim();
-            if (name && !seen.has(name)) {
-              seen.add(name);
-              results.push({ name, date: dateMatch[0], href: nameLink.getAttribute('href') || '' });
-            }
-          }
-        }
-      }
-
-      // Strategy 3: Brute force — get ALL text nodes, find dates, grab nearest name link above
-      const allLinks = Array.from(document.querySelectorAll('a[href*="/user/"], a[href*="profile.php?id="]'));
-      const monthNames = 'January|February|March|April|May|June|July|August|September|October|November|December';
-      const dateRegex = new RegExp(`(${monthNames})\\s+(\\d{1,2})(?:,?\\s*(\\d{4}))?`, 'i');
-      
-      // Get all text nodes with dates
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      const dateNodes = [];
-      let node;
-      while ((node = walker.nextNode())) {
-        const text = node.textContent?.trim();
-        if (text && dateRegex.test(text)) {
-          const match = text.match(dateRegex);
-          dateNodes.push({ element: node.parentElement, date: match[0], text });
-        }
-      }
-
-      // For each date node, find the closest preceding profile link
-      for (const dn of dateNodes) {
-        let closestLink = null;
-        let closestDist = Infinity;
-        
-        for (const link of allLinks) {
-          // Check if this link is "near" the date node (same parent or nearby)
-          let linkEl = link;
-          let dateEl = dn.element;
-          
-          // Walk up from both to find common ancestor
-          for (let i = 0; i < 6; i++) {
-            if (!linkEl || !dateEl) break;
-            if (linkEl === dateEl || linkEl.contains(dateEl) || dateEl.contains(linkEl)) {
-              if (i < closestDist) {
-                closestDist = i;
-                closestLink = link;
-              }
-              break;
-            }
-            linkEl = linkEl.parentElement;
-            dateEl = dateEl.parentElement;
-          }
-        }
-        
-        if (closestLink) {
-          const name = closestLink.textContent?.trim();
-          if (name && name.length > 1 && name.length < 80 && !seen.has(name)) {
-            // Make sure the name itself isn't a date
-            if (!dateRegex.test(name)) {
-              seen.add(name);
-              results.push({ name, date: dn.date, href: closestLink.getAttribute('href') || '' });
-            }
-          }
-        }
-      }
-
-      return results;
-    });
-
-    let newCount = 0;
-    for (const entry of entries) {
-      if (!allBirthdays.has(entry.name)) {
-        allBirthdays.set(entry.name, entry.date);
-        newCount++;
-      }
-    }
-
-    process.stdout.write(`\r📊 Total: ${allBirthdays.size} birthdays (found ${newCount} new this pass)...`);
-
-    if (newCount === 0) {
-      noNewCount++;
-      if (noNewCount >= 5) {
-        break;
-      }
+  // First, scroll through the entire page to make sure everything is loaded
+  let lastHeight = 0;
+  let scrollCount = 0;
+  while (scrollCount < 60) {
+    await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
+    await page.waitForTimeout(1500);
+    const h = await page.evaluate(() => document.body.scrollHeight);
+    if (h === lastHeight) {
+      scrollCount++;
+      if (scrollCount > 8) break;
     } else {
-      noNewCount = 0;
+      lastHeight = h;
+      scrollCount = 0;
+    }
+  }
+
+  // Scroll back to top
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(1000);
+
+  console.log('🔄 Collecting birthdays from tooltips and attributes...');
+
+  // Strategy 1: Check all images and links for title/aria-label attributes containing dates
+  const attrEntries = await page.evaluate((dateRegexStr) => {
+    const dateRegex = new RegExp(dateRegexStr, 'i');
+    const results = [];
+    const seen = new Set();
+
+    // Check ALL elements for title or aria-label containing a date
+    const allElements = document.querySelectorAll('[title], [aria-label], [data-tooltip-content], [data-hover="tooltip"]');
+    
+    for (const el of allElements) {
+      const attrs = [
+        el.getAttribute('title'),
+        el.getAttribute('aria-label'),
+        el.getAttribute('data-tooltip-content'),
+        el.getAttribute('data-tooltip'),
+      ].filter(Boolean);
+
+      for (const attr of attrs) {
+        if (dateRegex.test(attr)) {
+          const dateMatch = attr.match(dateRegex);
+          if (dateMatch) {
+            // Try to find the name — could be in the same attribute, a child element, or a nearby link
+            let name = '';
+            
+            // Check if the attribute contains both name and date
+            // e.g. "John Smith — March 15" or "John Smith, March 15, 1990"
+            const attrText = attr;
+            const dateIdx = attrText.indexOf(dateMatch[0]);
+            if (dateIdx > 0) {
+              name = attrText.substring(0, dateIdx).replace(/[—\-:,|]\s*$/, '').trim();
+            }
+            
+            // If no name in attribute, look for nearby link text
+            if (!name) {
+              const nearbyLink = el.querySelector('a') || el.closest('a');
+              if (nearbyLink) {
+                name = nearbyLink.textContent?.trim() || '';
+              }
+            }
+            
+            // If still no name, look at img alt text
+            if (!name) {
+              const img = el.querySelector('img') || (el.tagName === 'IMG' ? el : null);
+              if (img) {
+                name = img.getAttribute('alt')?.trim() || '';
+              }
+            }
+            
+            // Clean up name
+            if (name && name.length > 1 && name.length < 80 && !dateRegex.test(name)) {
+              if (!seen.has(name)) {
+                seen.add(name);
+                results.push({ name, date: dateMatch[0], source: 'attribute' });
+              }
+            }
+          }
+        }
+      }
     }
 
-    // Scroll down
-    await page.evaluate(() => {
-      window.scrollBy(0, window.innerHeight * 2);
-    });
-    await page.waitForTimeout(2000);
+    return results;
+  }, dateRegex.source);
 
-    iteration++;
+  for (const entry of attrEntries) {
+    allBirthdays.set(entry.name, entry.date);
+  }
+  console.log(`📋 Found ${allBirthdays.size} from attributes/tooltips`);
+
+  // Strategy 2: Hover over each avatar/profile image to trigger tooltips
+  console.log('🔄 Hovering over profile images to trigger tooltips...');
+
+  // Find all images that look like profile avatars
+  const profileImages = await page.$$('img[src*="scontent"], img[role="img"], img[alt]:not([alt=""])');
+  console.log(`🖼️  Found ${profileImages.length} images to check`);
+
+  let hoverCount = 0;
+  for (const img of profileImages) {
+    try {
+      // Check if this image has a date in its alt/title already
+      const alt = await img.getAttribute('alt') || '';
+      const title = await img.getAttribute('title') || '';
+      const existing = alt + ' ' + title;
+      
+      if (dateRegex.test(existing)) {
+        const dateMatch = existing.match(dateRegex);
+        const name = alt.replace(dateMatch[0], '').replace(/[—\-:,|]\s*$/, '').trim() || title.replace(dateMatch[0], '').trim();
+        if (name && name.length > 1 && name.length < 80 && !allBirthdays.has(name)) {
+          allBirthdays.set(name, dateMatch[0]);
+          continue;
+        }
+      }
+
+      // Hover to trigger tooltip
+      await img.hover();
+      await page.waitForTimeout(500);
+
+      // Check for tooltip that appeared
+      const tooltipText = await page.evaluate(() => {
+        // Facebook tooltips usually appear in elements with role="tooltip"
+        const tooltips = document.querySelectorAll('[role="tooltip"], [data-testid="tooltip"]');
+        for (const t of tooltips) {
+          const text = t.textContent?.trim();
+          if (text) return text;
+        }
+        // Also check for floating tooltip divs
+        const floaters = document.querySelectorAll('div[style*="position: absolute"][style*="z-index"]');
+        for (const f of floaters) {
+          const text = f.textContent?.trim();
+          if (text && text.length > 3) return text;
+        }
+        return '';
+      });
+
+      if (tooltipText && dateRegex.test(tooltipText)) {
+        const dateMatch = tooltipText.match(dateRegex);
+        // Extract name from tooltip text (everything before the date)
+        const dateIdx = tooltipText.indexOf(dateMatch[0]);
+        let name = dateIdx > 0 ? tooltipText.substring(0, dateIdx).replace(/[—\-:,|]\s*$/, '').trim() : '';
+        
+        // Fallback to alt text
+        if (!name) {
+          name = alt.replace(/['s ]+birthday.*/i, '').trim();
+        }
+        
+        if (name && name.length > 1 && name.length < 80 && !dateRegex.test(name)) {
+          if (!allBirthdays.has(name)) {
+            allBirthdays.set(name, dateMatch[0]);
+          }
+        }
+      }
+
+      hoverCount++;
+      if (hoverCount % 20 === 0) {
+        process.stdout.write(`\r📊 Hovered ${hoverCount}/${profileImages.length} images, found ${allBirthdays.size} birthdays...`);
+      }
+    } catch (e) {
+      // Skip this image
+    }
   }
 
   console.log('\n');
 
-  // Save debug HTML and text
-  const html = await page.content();
-  fs.writeFileSync(DEBUG_HTML, html);
-  console.log(`🔍 Debug HTML saved to ${DEBUG_HTML}`);
-
-  const pageText = await page.evaluate(() => document.body.innerText);
-  fs.writeFileSync(DEBUG_TXT, pageText);
-  console.log(`🔍 Debug text saved to ${DEBUG_TXT}`);
-
-  // Take final screenshot
-  await page.screenshot({ path: path.join(__dirname, 'birthdays-end.png'), fullPage: false });
+  // Strategy 3: Parse the debug text for any date-name pairs we might have missed
+  const textLines = pageText.split('\n').map(l => l.trim()).filter(Boolean);
+  for (let i = 0; i < textLines.length; i++) {
+    if (dateRegex.test(textLines[i])) {
+      const dateMatch = textLines[i].match(dateRegex);
+      // Look at previous lines for a name
+      for (let j = Math.max(0, i - 3); j < i; j++) {
+        const candidate = textLines[j].trim();
+        if (candidate && candidate.length > 1 && candidate.length < 80 && 
+            !dateRegex.test(candidate) && !allBirthdays.has(candidate) &&
+            !['Today\'s Birthdays', 'This Week', 'Recent Birthdays', 'Upcoming Birthdays', 
+              'Birthdays', 'See All', 'Comments', 'Like', 'Comment', 'Share'].includes(candidate)) {
+          if (/^[A-Z][a-zA-Z\s'.-]+$/.test(candidate) && candidate.split(' ').length <= 4) {
+            allBirthdays.set(candidate, dateMatch[0]);
+            break;
+          }
+        }
+      }
+    }
+  }
 
   if (allBirthdays.size === 0) {
-    console.log('\n⚠️  No birthdays found via automatic parsing.');
-    console.log('   Check birthdays-debug.txt and birthdays-debug.html to see the page structure.');
-    console.log('   Send me the debug text file and I\'ll update the parser.');
+    console.log('⚠️  Still no birthdays found.');
+    console.log('   Sending debug files will help me fix the parser.');
+    console.log(`   - ${DEBUG_TXT}`);
+    console.log(`   - ${DEBUG_HTML}`);
+    console.log('   Also check birthdays-start.png to see what the page looks like.');
   } else {
     // Write CSV
     const csvLines = ['Name,Birthday'];
@@ -233,7 +263,7 @@ const DEBUG_TXT = path.join(__dirname, 'birthdays-debug.txt');
       csvLines.push(`${safeName},${date}`);
     }
     fs.writeFileSync(OUTPUT_FILE, csvLines.join('\n'));
-    console.log(`\n✅ Saved ${allBirthdays.size} birthdays to ${OUTPUT_FILE}`);
+    console.log(`✅ Saved ${allBirthdays.size} birthdays to ${OUTPUT_FILE}`);
   }
 
   console.log('\nPress Enter to close the browser...');
