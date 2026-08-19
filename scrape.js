@@ -41,8 +41,8 @@ const OUTPUT_FILE = path.join(__dirname, 'birthdays.csv');
   });
 
   console.log('🔄 Navigating to birthdays page...');
-  await page.goto(BIRTHDAYS_URL, { waitUntil: 'networkidle' });
-  await page.waitForTimeout(3000);
+  await page.goto(BIRTHDAYS_URL, { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(5000);
 
   console.log('🔄 Scrolling to load all birthdays...');
 
